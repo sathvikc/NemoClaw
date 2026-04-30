@@ -1,12 +1,16 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+import fs from "node:fs";
+import path from "node:path";
+
 export interface OnboardCommandOptions {
   nonInteractive: boolean;
   resume: boolean;
   fresh: boolean;
   recreateSandbox: boolean;
   fromDockerfile: string | null;
+  sandboxName: string | null;
   acceptThirdPartySoftware: boolean;
   agent: string | null;
   dangerouslySkipPermissions: boolean;
@@ -39,7 +43,14 @@ const ONBOARD_BASE_ARGS = [
 
 function onboardUsageLines(noticeAcceptFlag: string): string[] {
   return [
-    `  Usage: nemoclaw onboard [--non-interactive] [--resume | --fresh] [--recreate-sandbox] [--from <Dockerfile>] [--agent <name>] [--control-ui-port <N>] [--dangerously-skip-permissions] [${noticeAcceptFlag}]`,
+    `  Usage: nemoclaw onboard [--non-interactive] [--resume | --fresh] [--recreate-sandbox] [--from <Dockerfile>] [--name <sandbox>] [--agent <name>] [--control-ui-port <N>] [--dangerously-skip-permissions] [${noticeAcceptFlag}]`,
+    "",
+    "  --from <Dockerfile> uses the Dockerfile's parent directory as the Docker build context.",
+    "  Put files referenced by COPY/ADD next to that Dockerfile, or move the Dockerfile into",
+    "  a dedicated build directory to avoid sending unrelated files to Docker.",
+    "  Common large directories are skipped: node_modules, .git, .venv, __pycache__.",
+    "  Credential-style files and directories such as .env*, .ssh, .aws, .netrc, .npmrc, secrets/, *.pem, and *.key are also skipped.",
+    "  Generated output directories such as dist/, build/, and target/ are still included.",
     "",
   ];
 }
@@ -63,13 +74,36 @@ export function parseOnboardArgs(
   let fromDockerfile: string | null = null;
   const fromIdx = parsedArgs.indexOf("--from");
   if (fromIdx !== -1) {
-    fromDockerfile = parsedArgs[fromIdx + 1] || null;
-    if (!fromDockerfile || fromDockerfile.startsWith("--")) {
+    const requestedFromDockerfile = parsedArgs[fromIdx + 1];
+    if (!requestedFromDockerfile || requestedFromDockerfile.startsWith("--")) {
       error("  --from requires a path to a Dockerfile");
       printOnboardUsage(error, noticeAcceptFlag);
       exit(1);
     }
+    const resolvedFromDockerfile = path.resolve(requestedFromDockerfile);
+    if (!fs.existsSync(resolvedFromDockerfile)) {
+      error(`  --from path not found: ${resolvedFromDockerfile}`);
+      exit(1);
+    }
+    if (!fs.statSync(resolvedFromDockerfile).isFile()) {
+      error(`  --from must point to a Dockerfile: ${resolvedFromDockerfile}`);
+      exit(1);
+    }
+    fromDockerfile = requestedFromDockerfile;
     parsedArgs.splice(fromIdx, 2);
+  }
+
+  let sandboxName: string | null = null;
+  const nameIdx = parsedArgs.indexOf("--name");
+  if (nameIdx !== -1) {
+    const nameValue = parsedArgs[nameIdx + 1];
+    if (typeof nameValue !== "string" || nameValue.length === 0 || nameValue.startsWith("--")) {
+      error("  --name requires a sandbox name");
+      printOnboardUsage(error, noticeAcceptFlag);
+      exit(1);
+    }
+    sandboxName = nameValue;
+    parsedArgs.splice(nameIdx, 2);
   }
 
   let agent: string | null = null;
@@ -132,6 +166,7 @@ export function parseOnboardArgs(
     fresh,
     recreateSandbox: parsedArgs.includes("--recreate-sandbox"),
     fromDockerfile,
+    sandboxName,
     acceptThirdPartySoftware:
       parsedArgs.includes(noticeAcceptFlag) || String(deps.env[noticeAcceptEnv] || "") === "1",
     agent,
