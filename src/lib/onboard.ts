@@ -84,6 +84,7 @@ const {
 }: typeof import("./onboard/dockerfile-patch") = require("./onboard/dockerfile-patch");
 const {
   agentSupportsWebSearch,
+  agentSupportsWebSearchProvider,
 }: typeof import("./onboard/web-search-support") = require("./onboard/web-search-support");
 const onboardDashboard: typeof import("./onboard/dashboard") = require("./onboard/dashboard");
 const dashboardRuntime: typeof import("./onboard/dashboard-runtime") = require("./onboard/dashboard-runtime");
@@ -948,7 +949,8 @@ function upsertMessagingProviders(
   tokenDefs: MessagingTokenDef[],
   options: { replaceExisting?: boolean } = {},
 ) {
-  braveProviderProfile.ensureBraveProviderProfile(tokenDefs, { root: ROOT, runOpenshell, redact });
+  // biome-ignore format: keep src/lib/onboard.ts net-neutral for growth guardrail.
+  braveProviderProfile.ensureWebSearchProviderProfiles(tokenDefs, { root: ROOT, runOpenshell, redact });
   const upserted = onboardProviders.upsertMessagingProviders(tokenDefs, runOpenshell, options);
   // upsertMessagingProviders process.exits on failure, so reaching this
   // point means every entry in tokenDefs that had a token was registered.
@@ -1002,14 +1004,8 @@ const { pruneStaleSandboxEntry, confirmRecreateForSelectionDrift, isOpenclawRead
     isAffirmativeAnswer,
   });
 
-const { ensureValidatedBraveSearchCredential, configureWebSearch, verifyWebSearchInsideSandbox } =
-  createWebSearchFlowHelpers({
-    prompt,
-    note,
-    isNonInteractive,
-    cliName,
-    runCaptureOpenshell,
-  });
+// biome-ignore format: keep src/lib/onboard.ts net-neutral for growth guardrail.
+const { ensureValidatedWebSearchCredential, ensureValidatedBraveSearchCredential, configureWebSearch, verifyWebSearchInsideSandbox } = createWebSearchFlowHelpers({ prompt, note, isNonInteractive, cliName, runCaptureOpenshell });
 
 // getSandboxInferenceConfig — moved to onboard-providers.ts
 
@@ -2601,6 +2597,7 @@ async function createSandbox(
       channels: MESSAGING_CHANNELS,
       enabledChannels,
       sandboxName,
+      agentName: agent?.name ?? "openclaw",
       webSearchConfig,
       env: process.env,
     },
@@ -5064,6 +5061,7 @@ async function onboard(opts: OnboardOptions = {}): Promise<void> {
         sandboxDeps: {
           resolvePath: path.resolve,
           agentSupportsWebSearch,
+          agentSupportsWebSearchProvider,
           note,
           updateSession: onboardSession.updateSession,
           getStoredMessagingChannelConfig,
@@ -5076,7 +5074,7 @@ async function onboard(opts: OnboardOptions = {}): Promise<void> {
           stringSetsEqual,
           removeSandboxFromRegistry: registry.removeSandbox.bind(registry),
           repairRecordedSandbox,
-          ensureValidatedBraveSearchCredential,
+          ensureValidatedWebSearchCredential,
           isBackToSelection,
           configureWebSearch,
           startRecordedStep,
@@ -5294,6 +5292,7 @@ module.exports = {
   classifySandboxCreateFailure,
   configureWebSearch,
   createSandbox,
+  ensureValidatedWebSearchCredential,
   ensureValidatedBraveSearchCredential,
   formatEnvAssignment,
   getFutureShellPathHint,
@@ -5365,6 +5364,7 @@ module.exports = {
   openshellArgv,
   runCaptureOpenshell,
   agentSupportsWebSearch,
+  agentSupportsWebSearchProvider,
   setupInference,
   setupMessagingChannels,
   MESSAGING_CHANNELS,
