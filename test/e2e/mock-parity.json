@@ -19,6 +19,10 @@
       "fast": ["test/e2e/support/onboard-performance.test.ts"]
     },
     {
+      "live": "test/e2e/live/network-policy.test.ts",
+      "fast": ["test/validate-blueprint.test.ts"]
+    },
+    {
       "live": "test/e2e/live/openclaw-tui-chat-correlation.test.ts",
       "fast": [
         "test/e2e/support/openclaw-tui-ref-fidelity.test.ts",
