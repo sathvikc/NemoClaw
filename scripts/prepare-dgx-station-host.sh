@@ -13,6 +13,7 @@ readonly GB300_PCI_VENDOR="0x10de"
 readonly GB300_PCI_DEVICE="0x31c2"
 readonly GB300_PCI_CLASS_PREFIX="0x03"
 STATION_HOST_PROFILE="generic-ubuntu"
+FORCE_STATION_INSTALL=0
 # The qualified generic image currently ships this OEM telemetry bootcmd. Its
 # exception disappears automatically when the file changes or the bootcmd
 # failure is fixed; update the pin only with a newly audited image.
@@ -80,7 +81,7 @@ readonly -a BASEOS_PACKAGE_SPECS=(
 readonly BASEOS_CLOUD_CFG_SHA256="038ba435093de59f4a21021caf6c921d63344e9aae3b88795ee5b2659f43f437"
 readonly BASEOS_CLOUD_INIT_UNIT_SHA256="e13dd95a7bfac6407ea1ce45ed6683c0f4e84c791840d305c937d38ae77d9456"
 readonly BASEOS_FLUENT_BIT_UNIT_SHA256="1854339f563e518894c156d081912595d2d6e175a1ed6692e74e88224b6bad5f"
-readonly BASEOS_FLUENT_BIT_CFG_SHA256="bb380bf6103957cdd7440dfba60107b7a3f50db3c0e75c483a6bfdb5e046201c"
+readonly BASEOS_FLUENT_BIT_CFG_NORMALIZED_SHA256="ffec8b1bcc628877b9a230c6b26313b5ee6b25c20398580832133dbb15349551"
 readonly BASEOS_FLUENT_BIT_PARSERS_SHA256="760e6a347874a6cbdc10c6cd21d82d1ee5388c8573ddfaab05ef37904749dbe1"
 readonly BASEOS_FLUENT_BIT_PLUGINS_SHA256="9d5aad2c1be151b4d35de53a460f9783f98ac3cc815ebc638b0e8489f4ecd577"
 readonly BASEOS_FWUPD_UNIT_SHA256="835e7c291761c247d3cd5c64652b768c6a7fdc7cc72fea1bf70fc92e4cb3cfd5"
@@ -107,6 +108,10 @@ station_product_name_path() {
 
 station_pci_devices_path() {
   printf '%s' /sys/bus/pci/devices
+}
+
+reboot_required() {
+  [[ -e /var/run/reboot-required ]]
 }
 
 dgx_station_release_file_is_safe() {
@@ -269,11 +274,15 @@ on_error() {
 
 usage() {
   cat <<'EOF'
-Usage: prepare-dgx-station-host.sh --check|--apply|--verify
+Usage: prepare-dgx-station-host.sh --check|--apply|--verify [--force-station-install]
 
   --check   Read-only eligibility and current-state report.
   --apply   Install exact prerequisites or finish post-reboot runtime setup.
   --verify  Read-only host verification plus ephemeral GPU container tests.
+  --force-station-install
+            Bypass only the DGX release-metadata allowlist. ARM64 Ubuntu 24.04,
+            Station GB300 hardware, and all factory-runtime health checks still
+            apply. The existing driver and container runtime are preserved.
 
 Exit 10 from --apply means an operator-controlled reboot is required. After
 the reboot, run --apply once more, followed by --verify.
@@ -282,11 +291,22 @@ run --apply again; a reboot is not required.
 EOF
 }
 
-is_valid_mode() {
-  case "${1:-}" in
-    --check | --apply | --verify | --classify-dgx-release) return 0 ;;
-    *) return 1 ;;
-  esac
+parse_args() {
+  local arg
+  MODE=""
+  FORCE_STATION_INSTALL=0
+  for arg in "$@"; do
+    case "$arg" in
+      --check | --apply | --verify | --classify-dgx-release)
+        [[ -z "$MODE" ]] || return 1
+        MODE="$arg"
+        ;;
+      --force-station-install) FORCE_STATION_INSTALL=1 ;;
+      *) return 1 ;;
+    esac
+  done
+  [[ -n "$MODE" ]] || return 1
+  [[ "$MODE" != "--classify-dgx-release" || "$FORCE_STATION_INSTALL" == "0" ]]
 }
 
 is_station_gb300_product() {
@@ -369,6 +389,21 @@ file_sha256_matches() {
   [[ "$actual" == "$expected" ]]
 }
 
+baseos_fluent_bit_config_matches() {
+  local path=$1 expected=$2 actual
+  root_owned_file_is_not_writable_by_group_or_other "$path" || return 1
+  actual="$({
+    LC_ALL=C sed -E \
+      -e 's/^([[:space:]]*Add Hostname) [A-Za-z0-9][A-Za-z0-9._-]*$/\1 <HOSTNAME>/' \
+      -e 's/^([[:space:]]*Add MAC) ([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$/\1 <MAC>/' \
+      -e 's/^([[:space:]]*Add IP) ([0-9]{1,3}\.){3}[0-9]{1,3}$/\1 <IP>/' \
+      "$path" \
+      | sha256sum \
+      | awk '{print $1}'
+  } 2>/dev/null)" || return 1
+  [[ "$actual" == "$expected" ]]
+}
+
 systemd_property_matches() {
   local unit=$1 property=$2 expected=$3 actual
   actual="$(systemctl show "$unit" -p "$property" --value 2>/dev/null)" || return 1
@@ -402,7 +437,8 @@ baseos_cloud_init_failure_is_qualified() {
 baseos_fluent_bit_failure_is_qualified() {
   baseos_failed_unit_matches fluent-bit.service \
     /usr/lib/systemd/system/fluent-bit.service "$BASEOS_FLUENT_BIT_UNIT_SHA256" enabled 1 \
-    && file_sha256_matches /etc/fluent-bit/fluent-bit.conf "$BASEOS_FLUENT_BIT_CFG_SHA256" \
+    && baseos_fluent_bit_config_matches \
+      /etc/fluent-bit/fluent-bit.conf "$BASEOS_FLUENT_BIT_CFG_NORMALIZED_SHA256" \
     && file_sha256_matches /etc/fluent-bit/parsers.conf "$BASEOS_FLUENT_BIT_PARSERS_SHA256" \
     && file_sha256_matches /etc/fluent-bit/plugins.conf "$BASEOS_FLUENT_BIT_PLUGINS_SHA256"
 }
@@ -556,7 +592,7 @@ verify_baseos_packages() {
 
 station_uses_factory_runtime() {
   case "$STATION_HOST_PROFILE" in
-    stock-dgx-os | colossus-baseos | ai-developer-tools) return 0 ;;
+    stock-dgx-os | colossus-baseos | ai-developer-tools | forced-factory-runtime) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -605,7 +641,12 @@ check_platform() {
     supported-colossus-baseos) STATION_HOST_PROFILE="colossus-baseos" ;;
     supported-ai-developer-tools) STATION_HOST_PROFILE="ai-developer-tools" ;;
     *)
-      fatal "This DGX Station OS image is outside the validated boundary"
+      if ((FORCE_STATION_INSTALL == 1)); then
+        STATION_HOST_PROFILE="forced-factory-runtime"
+        warn "DGX release metadata allowlist bypassed by explicit --force-station-install intent; all hardware and factory-runtime health checks remain required"
+      else
+        fatal "This DGX Station OS image is outside the validated boundary"
+      fi
       ;;
   esac
   info "platform=${product} profile=${STATION_HOST_PROFILE} release=${release_state} os=${PRETTY_NAME} arch=${arch} kernel=$(uname -r)"
@@ -842,6 +883,7 @@ common_preflight() {
   require_command getent
   require_command grep
   require_command ps
+  require_command sed
   require_command sha256sum
   require_command ss
   require_command stat
@@ -1451,8 +1493,9 @@ run_apply() {
   common_preflight
 
   if station_uses_factory_runtime; then
-    [[ ! -e /var/run/reboot-required ]] \
-      || fatal "A reboot is pending on the Station factory image; reboot before running Station express install"
+    if reboot_required; then
+      fatal "A reboot is pending on the Station factory image; reboot before running Station express install"
+    fi
     if [[ "$STATION_HOST_PROFILE" == "colossus-baseos" ]]; then
       finish_runtime
     fi
@@ -1479,7 +1522,7 @@ run_apply() {
   require_command readlink
   require_command sha256sum
 
-  if [[ -e /var/run/reboot-required ]]; then
+  if reboot_required; then
     if all_packages_exact && ! driver_loaded_exact; then
       warn "A reboot is required before runtime setup can continue"
       exit "$REBOOT_REQUIRED_EXIT"
@@ -1543,11 +1586,10 @@ run_verify() {
 }
 
 main() {
-  if (($# != 1)) || ! is_valid_mode "${1:-}"; then
+  if ! parse_args "$@"; then
     usage >&2
     exit 2
   fi
-  MODE=$1
   if [[ "$MODE" == "--classify-dgx-release" ]]; then
     dgx_station_release_state
     return 0
